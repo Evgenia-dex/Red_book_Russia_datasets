@@ -9,10 +9,10 @@
 
 Здесь представлены результаты парсинга Красной книги:
 
-- [Животные (Animals) - CSV](https://github.com/Evgenia-dex/Red_book_Russia_datasets/blob/main/data/processed/animals_final.csv)
-- [Животные (Animals) - JSON](https://github.com/Evgenia-dex/Red_book_Russia_datasets/blob/main/data/processed/animals_final.json)
-- [Растения (Plants) - CSV](https://github.com/Evgenia-dex/Red_book_Russia_datasets/blob/main/data/processed/plants_final.csv)
-- [Растения (Plants) - JSON](https://github.com/Evgenia-dex/Red_book_Russia_datasets/blob/main/data/processed/plants_final.json)
+- [Животные (Animals) - CSV](https://github.com/Evgenia-dex/Red_book_Russia_datasets/blob/main/data/processed/final_animals.csv)
+- [Животные (Animals) - JSON](https://github.com/Evgenia-dex/Red_book_Russia_datasets/blob/main/data/processed/final_animals.json)
+- [Растения (Plants) - CSV](https://github.com/Evgenia-dex/Red_book_Russia_datasets/blob/main/data/processed/final_plants.csv)
+- [Растения (Plants) - JSON](https://github.com/Evgenia-dex/Red_book_Russia_datasets/blob/main/data/processed/final_plants.json)
 
 ## Источники данных
 Официальный сайт Министерства природных ресурсов и экологии Российской Федерации: 
