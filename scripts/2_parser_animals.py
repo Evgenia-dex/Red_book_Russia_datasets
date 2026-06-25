@@ -2,196 +2,286 @@ import re
 import csv
 import glob
 from pathlib import Path
+from bs4 import BeautifulSoup
 
 
-def clean_html_tags(text):
+def clean_text(text):
     if not text:
         return ''
-    # 1. Принудительно вычищаем текстовые сущности неразрывного пробела, которые ломали отображение
-    text = text.replace('&#160;', ' ').replace('&nbsp;', ' ')
-
-    # 2. Заменяем ВСЕ HTML-теги на пробелы, чтобы слова на стыках форматирования (например, после <b>)
-    # никогда не склеивались впритык друг к другу
-    text = re.sub(r'<[^>]+>', ' ', text)
-    return text
-
-
-def global_linear_clean(text):
-    if not text:
-        return ''
-    # Очищаем от остаточных скрытых символов переноса и спецкодов
-    text = text.replace('\xa0', ' ').replace('\xad', '')
-
-    # Склеиваем слова, которые были разорваны дефисами при переносе на новую строку (числен- ности -> численности)
-    text = re.sub(r'(\w+)[-‐‑]\s+(\w+)', r'\1\2', text)
-
-    # КЛЮЧЕВОЙ ШАГ: Находим любые последовательности пробелов, табов, а также символов
-    # переноса строк (\n, \r) и СЖИМАЕМ их в один обычный пробел.
-    # Это полностью убирает дефект "текста через одну строку" и делает абзац сплошным.
+    text = text.replace('\xa0', ' ')
     text = re.sub(r'\s+', ' ', text)
-
+    text = re.sub(r'!+', '', text)
+    text = re.sub(r'\s+\d+$', '', text)
     return text.strip()
 
 
-def parse_file(filepath):
-    with open(filepath, 'r', encoding='utf-8') as f:
-        content = f.read()
+def parse_animal_file(file_path, debug=False):
+    with open(file_path, 'r', encoding='utf-8') as f:
+        soup = BeautifulSoup(f, 'html.parser')
 
-    # Нормализуем переносы: превращаем блочные разрывы в стандартный символ новой строки \n
-    content = re.sub(r'</p>|</div>|<br\s*/?>', '\n', content)
-    lines = content.split('\n')
+    # ---- Русское название ----
+    russian_name = ''
+    for p in soup.find_all('p', class_='ft028'):
+        text = p.get_text().strip()
+        if re.search('[а-яА-Я]', text) and not re.search('[a-zA-Z]', text):
+            russian_name = clean_text(text)
+            break
 
-    # Поиск номера страницы
-    page_match = re.search(r'<a name=(\d+)>', content)
-    page = page_match.group(1) if page_match else Path(filepath).stem.split('_')[0]
+    # ---- Латинское название ----
+    latin_name = ''
+    for p in soup.find_all('p', class_='ft029'):
+        text = p.get_text().strip()
+        latin_name = clean_text(text)
+        break
 
-    russian_name = ""
-    latin_name = ""
-    family = ""
+    # ---- Отряд и семейство ----
+    family = ''
+    for p in soup.find_all('p', class_='ft031'):
+        text = p.get_text().strip()
+        f_match = re.search(r'Семейство\s+([А-Яа-яёЁ\s–-]+)', text)
+        if f_match:
+            family = clean_text(f_match.group(1)).strip(' –-')
+        break
 
-    # 1. Извлечение Латыни, Русского названия и Семейства
-    for i, line in enumerate(lines):
-        if '<i>' in line and re.search(r'[A-Za-z]', line) and not latin_name:
-            lat_match = re.search(r'<i>(.*?)</i>', line)
-            if lat_match:
-                latin_name = global_linear_clean(clean_html_tags(lat_match.group(1)))
+    # ---- Поиск заголовков (Авторы исключены из заголовков!) ----
+    all_ps = soup.find_all('p')
 
-            clean_line = clean_html_tags(line).replace(latin_name, '').strip(' ,.;:-')
-            if clean_line and re.search(r'[А-Яа-я]', clean_line):
-                russian_name = global_linear_clean(clean_line)
-            elif i > 0:
-                russian_name = global_linear_clean(clean_html_tags(lines[i - 1])).strip(' ,.;:-')
-
-        if 'Семейство' in line and not family:
-            fam_match = re.search(r'Семейство\s+([А-Яа-яёЁ\s–-]+)', clean_html_tags(line))
-            if fam_match:
-                family = global_linear_clean(fam_match.group(1))
-
-    # 2. Карта соответствия заголовков разделов
-    headers_map = {
-        'Категория': 'category',
-        'Распространение': 'distribution',
-        'Места обитания': 'habitat',
-        'Численность': 'abundance',
-        'Лимитирующие факторы': 'limiting_factors',
-        'Принятые меры': 'protection_measures',
-        'Необходимые дополнительные': 'additional_measures',
-        'Автор': 'author',
-        'Составител': 'author'
+    header_map = {
+        'категория и статус': 'category',
+        'категория': 'category',
+        'распространение': 'distribution',
+        'места обитания': 'habitat',
+        'особенности экологии': 'habitat',
+        'численность': 'abundance',
+        'лимитирующие факторы': 'limiting_factors',
+        'принятые меры': 'protection_measures',
+        'дополнительные меры': 'additional_measures',
+        'необходимые': 'additional_measures'
     }
 
-    results = {k: [] for k in headers_map.values()}
-    current_field = None
+    header_indices = []
+    header_fields = []
 
-    # 3. Линейный сбор сырых строк по секциям
-    for line in lines:
-        clean_l = clean_html_tags(line).strip()
-        if not clean_l:
-            continue
+    for i, p in enumerate(all_ps):
+        classes = p.get('class', [])
+        text_lower = p.get_text().lower().replace('-\n', '').replace('- ', '').strip()
 
-        is_header = False
-
-        # Если в строке есть <b> — это маркер начала нового раздела
-        if '<b>' in line:
-            for h_key, f_key in headers_map.items():
-                if h_key.lower() in clean_l.lower() and len(clean_l) < 150:
-                    current_field = f_key
-                    is_header = True
-                    # Вырезаем сам заголовок из полезного текста ячейки
-                    clean_l = re.sub(rf'(?i){h_key}[^.]*\.?', '', clean_l).strip()
+        if 'ft011' in classes or (len(text_lower) > 3 and len(text_lower) < 45):
+            for key, field in header_map.items():
+                if key in text_lower and field not in header_fields:
+                    header_indices.append(i)
+                    header_fields.append(field)
                     break
 
-        if not is_header and re.search(r'(?i)(Автор[ы]?-составител|Составител)', clean_l):
-            current_field = 'author'
-            clean_l = re.sub(r'(?i)(Автор[ы]?-составител[ьяи]|Составител[ьи])[.:\s]*', '', clean_l).strip()
+    # ---- Извлекаем текст разделов ----
+    result = {field: '' for field in header_map.values()}
+    result['author'] = ''  # Инициализируем пустую колонку автора
 
-        # Складываем строчки как есть, пока не встретим новый заголовок
-        if current_field and clean_l:
-            results[current_field].append(clean_l)
+    for idx, start_i in enumerate(header_indices):
+        end_i = header_indices[idx + 1] if idx + 1 < len(header_indices) else len(all_ps)
+        field = header_fields[idx]
 
-    # 4. Финальная склейка "встык" и тотальное уничтожение межстрочных разрывов
-    final_data = {}
-    for k, v in results.items():
-        # Склеиваем массив строк через пробел
-        raw_joined = ' '.join(v)
-        # Прогоняем весь получившийся монолитный текст через глобальный сжиматель
-        final_data[k] = global_linear_clean(raw_joined)
+        lines = []
+        for i in range(start_i + 1, end_i):
+            p = all_ps[i]
 
-    # 5. Очистка от мусорных заголовков внутри ячеек (как в томе растений)
-    final_data['habitat'] = re.sub(r'^(и особенности экологии)[.,\s]*', '', final_data['habitat'], flags=re.IGNORECASE)
-    final_data['additional_measures'] = re.sub(r'^(меры охраны|необходимые дополнительные меры охраны)[.,\s]*', '',
-                                               final_data['additional_measures'], flags=re.IGNORECASE)
+            text = clean_text(p.get_text())
+            if not text or re.match(r'^\d+$', text):
+                continue
 
-    # 6. Извлечение кодов категорий и нормализация авторов по маске
-    category_raw = final_data['category']
-    cat_num_match = re.search(r'\b([0-5])\b', category_raw)
-    category_numeric = cat_num_match.group(1) if cat_num_match else ''
-    codes = re.findall(r'\b(У|III|II|I|КР|НО|НД|БУ|И)\b', category_raw)
-    category_text = ', '.join(sorted(set(codes)))
+            style = p.get('style', '')
+            top_match = re.search(r'top:(\d+)px', style)
+            left_match = re.search(r'left:(\d+)px', style)
 
-    author_raw = final_data['author']
-    author_matches = re.findall(r'[А-Я]\.[А-Я]\.\s*[А-Я][а-я]+', author_raw)
-    author = ', '.join(author_matches) if author_matches else author_raw.strip(' ,.-')
+            page_div = p.find_parent('div')
+            page_id = page_div.get('id', '') if page_div else ''
+            p_match = re.search(r'\d+', page_id)
+            page_num = int(p_match.group()) if p_match else 0
 
-    genus = latin_name.split()[0] if latin_name else ''
+            if top_match and left_match:
+                top = int(top_match.group(1))
+                left = int(left_match.group(1))
+                lines.append((page_num, top, left, text))
 
-    # 7. Формирование строки датасета (14 унифицированных полей)
+        # СУПЕР-УМНАЯ 4D-СОРТИРОВКА
+        CENTER_X = 350
+        lines.sort(key=lambda x: (
+            x[0],
+            0 if x[2] < CENTER_X else 1,
+            x[1] // 10,
+            x[2]
+        ))
+
+        section_text = ''
+        for page_num, top, left, text in lines:
+            if not text:
+                continue
+            if section_text.endswith('-'):
+                section_text = section_text[:-1] + text
+            else:
+                if section_text and not text.startswith(('.', ',', ';', ':', '!', '?')):
+                    section_text += ' '
+                section_text += text
+
+        result[field] = clean_text(section_text)
+
+    # ==========================================
+    # ИДЕАЛЬНАЯ ЛОГИКА ДЛЯ КАТЕГОРИЙ
+    # ==========================================
+    cat_raw = result.get('category', '')
+
+    for i, p in enumerate(all_ps):
+        if i in header_indices:
+            idx = header_indices.index(i)
+            if header_fields[idx] == 'category':
+                cat_raw = p.get_text() + ' ' + cat_raw
+                break
+
+    cat_num = re.search(r'\b([0-5])\b', cat_raw)
+    category_numeric = cat_num.group(1) if cat_num else ''
+
+    letters = []
+    for code in ['КР', 'ИЗ', 'НД', 'БУ', 'ВО', 'НО']:
+        if re.search(r'\b' + code + r'\b', cat_raw):
+            letters.append(code)
+
+    if re.search(r'\bУ\b\s*[–-]', cat_raw) or 'уязвим' in cat_raw.lower():
+        letters.append('У')
+
+    romans = re.findall(r'\b(III|II|I)\b', cat_raw)
+
+    final_codes = []
+    for code in letters + romans:
+        if code not in final_codes:
+            final_codes.append(code)
+
+    category_text = ', '.join(final_codes)
+
+    # ==========================================
+    # ИДЕАЛЬНАЯ ЛОГИКА АВТОРОВ (Строго 2 условия)
+    # ==========================================
+    author_text_raw = ""
+
+    # Ищем авторов во всех собранных текстовых блоках
+    for field in list(result.keys()):
+        if field == 'author':
+            continue
+
+        text = result[field]
+        if not text:
+            continue
+
+        # 1. Отсекаем литературу
+        lit_match = re.search(r'(?i)\b(?:литератур[аеыу]|источники|основная литература)\b', text)
+        if lit_match:
+            text = text[:lit_match.start()]
+
+        # 2. Ищем строгое слово "Автор-составитель" или "Авторы-составители"
+        auth_match = re.search(r'(?i)Автор[ы]?\s*-\s*составител[ьи][\.\:]?\s*', text)
+        if auth_match:
+            # Забираем всё, что идет ПОСЛЕ слова "автор-составитель"
+            author_text_raw = text[auth_match.end():]
+            # А из исходного поля (например, "меры охраны") удаляем этот кусок
+            text = text[:auth_match.start()]
+
+        result[field] = text.strip()
+
+    # 3. Применяем жесткую регулярку ФИО к найденному куску текста
+    if author_text_raw:
+        # Паттерн: Инициалы (1 или 2) + Фамилия С БОЛЬШОЙ БУКВЫ (исключает D. middendorffi)
+        fio_pattern = r'[А-ЯЁA-Z]\.\s*(?:[А-ЯЁA-Z]\.\s*)?[А-ЯЁA-Z][а-яёa-z]+(?:-[А-ЯЁA-Z][а-яёa-z]+)?'
+        author_matches = re.findall(fio_pattern, author_text_raw)
+
+        unique_authors = []
+        for a in author_matches:
+            # Чистим пробелы для идеального формата "А.В. Иванов"
+            clean_a = a.replace(' ', '')
+            clean_a = re.sub(r'\.([А-ЯЁA-Z])', r'. \1', clean_a)
+            clean_a = re.sub(r'([А-ЯЁA-Z]\.)\s*([А-ЯЁA-Z]\.)', r'\1\2', clean_a)
+
+            if clean_a not in unique_authors:
+                unique_authors.append(clean_a)
+
+        result['author'] = ', '.join(unique_authors)
+
+    # ---- Род и Номер страницы ----
+    genus = ''
+    if latin_name:
+        genus_match = re.match(r'([A-Z][a-z]+)', latin_name)
+        genus = genus_match.group(1) if genus_match else ''
+
+    page_num = ''
+    page_comment = soup.find(string=re.compile(r'Page \d+'))
+    if page_comment:
+        page_match = re.search(r'Page (\d+)', page_comment)
+        if page_match:
+            page_num = page_match.group(1)
+    if not page_num:
+        name = Path(file_path).stem
+        num_match = re.search(r'^\d+', name)
+        if num_match:
+            page_num = num_match.group(0)
+
+    if debug:
+        print(f"\n[DEBUG] Файл: {Path(file_path).name}")
+        print(f"Категория цифра: {category_numeric}")
+        print(f"Категория текст: {category_text}")
+        print(f"Авторы: {result['author']}")
+
     return {
-        'latin_name': latin_name,
-        'page': page,
+        'page': page_num,
         'russian_name': russian_name,
+        'latin_name': latin_name,
         'family': family,
         'genus': genus,
         'category_numeric': category_numeric,
         'category_text': category_text,
-        'distribution': final_data['distribution'],
-        'habitat': final_data['habitat'],
-        'abundance': final_data['abundance'],
-        'limiting_factors': final_data['limiting_factors'],
-        'protection_measures': final_data['protection_measures'],
-        'additional_measures': final_data['additional_measures'],
-        'author': author
+        'distribution': result.get('distribution', ''),
+        'habitat': result.get('habitat', ''),
+        'abundance': result.get('abundance', ''),
+        'limiting_factors': result.get('limiting_factors', ''),
+        'protection_measures': result.get('protection_measures', ''),
+        'additional_measures': result.get('additional_measures', ''),
+        'author': result.get('author', '')
     }
 
 
-def process_all_files(input_folder, output_csv):
+def process_all_html_files(input_folder, output_csv, debug_file=None):
     html_files = glob.glob(str(Path(input_folder) / '*.html'))
+    if not html_files:
+        print(f"В папке {input_folder} нет .html файлов.")
+        return
+
     all_records = []
-    seen_latin = set()
-
-    print(f"Найдено {len(html_files)} файлов для парсинга.")
-
     for file_path in sorted(html_files):
-        try:
-            record = parse_file(file_path)
-            if record and record['latin_name']:
-                if record['latin_name'] not in seen_latin:
-                    all_records.append(record)
-                    seen_latin.add(record['latin_name'])
-        except Exception as e:
-            print(f"Ошибка в файле {Path(file_path).name}: {e}")
+        debug = (debug_file and Path(file_path).name == debug_file)
+        record = parse_animal_file(file_path, debug=debug)
+
+        if record and (record['russian_name'] or record['latin_name']):
+            all_records.append(record)
 
     if not all_records:
-        print("❌ Нет данных для сохранения.")
+        print("Нет данных для сохранения.")
         return
 
     fieldnames = [
-        'latin_name', 'page', 'russian_name', 'family', 'genus',
+        'page', 'russian_name', 'latin_name', 'family', 'genus',
         'category_numeric', 'category_text', 'distribution', 'habitat',
         'abundance', 'limiting_factors', 'protection_measures',
         'additional_measures', 'author'
     ]
 
-    with open(output_csv, 'w', newline='', encoding='utf-8-sig') as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+    with open(output_csv, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames, delimiter=',', quoting=csv.QUOTE_MINIMAL)
         writer.writeheader()
-        writer.writerows(all_records)
+        for record in all_records:
+            writer.writerow(record)
 
-    print(f"✅ УСПЕХ! Рваные строки склеены. Создан идеальный CSV: {len(all_records)} видов.")
+    print(f"Готово! Сохранено {len(all_records)} записей в {output_csv}")
 
 
 if __name__ == '__main__':
-    INPUT_DIR = '/Users/evgeniashemina/Desktop/final_animals/splited_animals_final'
-    OUTPUT_CSV = '/Users/evgeniashemina/Desktop/final_animals/RED_BOOK_ANIMALS_FINAL.csv'
+    INPUT_DIR = '/Users/evgeniashemina/Desktop/final_animals/splited_animals'
+    OUTPUT_CSV = '/Users/evgeniashemina/Desktop/final_animals/parsed_animals_25.06_7.csv'
 
-    process_all_files(INPUT_DIR, OUTPUT_CSV)
+    process_all_html_files(INPUT_DIR, OUTPUT_CSV)

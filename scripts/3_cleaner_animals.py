@@ -1,63 +1,98 @@
 import pandas as pd
+import numpy as np
 import re
 
+# Укажи путь к спарсенному файлу (результату работы парсера)
+INPUT_CSV = '/Users/evgeniashemina/Desktop/final_animals/parsed_animals_FINAL.csv'
+# Укажи путь, куда сохранить финальный чистый датасет
+OUTPUT_CSV = '/Users/evgeniashemina/Desktop/final_animals/RED_BOOK_ANIMALS_CLEANED.csv'
 
-def clean_animals_dataset(input_path, output_path):
-    print("Запуск очистки датасета с животными...")
+# Загружаем CSV
+df = pd.read_csv(INPUT_CSV, dtype=str)
 
-    try:
-        # 1. Загрузка сырого датасета
-        df = pd.read_csv(input_path)
-        initial_rows = len(df)
+# ==========================================
+# ХИРУРГИЧЕСКАЯ ОЧИСТКА АРТЕФАКТОВ
+# ==========================================
+# Убираем "гии." (с точкой и возможным пробелом) ТОЛЬКО в начале строки
+if 'habitat' in df.columns:
+    df['habitat'] = df['habitat'].str.replace(r'^гии\.\s*', '', regex=True, flags=re.IGNORECASE)
 
-        # Очищаем названия колонок от случайных пробелов
-        df.columns = df.columns.str.strip()
+# Убираем "охраны." или "раны." ТОЛЬКО в начале строки
+if 'additional_measures' in df.columns:
+    df['additional_measures'] = df['additional_measures'].str.replace(r'^(охраны|раны)\.\s*', '', regex=True,
+                                                                      flags=re.IGNORECASE)
 
-        # 2. Удаление строк, где нет критически важных данных (названия или категории)
-        df = df.dropna(subset=['Русское название', 'Латинское название', 'Категория редкости'])
-
-        # 3. Очистка текстовых полей от лишних пробелов по краям
-        text_columns = ['Русское название', 'Латинское название', 'Категория редкости', 'Авторы']
-        for col in text_columns:
-            if col in df.columns:
-                df[col] = df[col].astype(str).str.strip()
-
-        # 4. Нормализация категорий редкости (приводим к единому стандарту, например "3", "1A" и т.д.)
-        # Удаляем точки, лишние знаки и приводим к верхнему регистру
-        df['Категория редкости'] = df['Категория редкости'].apply(lambda x: re.sub(r'[\s\.]', '', x).upper())
-
-        # 5. Очистка колонки "Авторы" от квадратных скобок, лишних знаков и опечаток склейки
-        if 'Авторы' in df.columns:
-            def clean_authors(text):
-                if pd.isna(text) or text.lower() == 'nan':
-                    return "Не указан"
-                # Удаляем квадратные и круглые скобки вместе с содержимым (часто там технические пометки)
-                text = re.sub(r'\[.*?\]', '', text)
-                text = re.sub(r'\(.*?\)', '', text)
-                # Заменяем множественные пробелы на один
-                text = re.sub(r'\s+', ' ', text)
-                return text.strip()
-
-            df['Авторы'] = df['Авторы'].apply(clean_authors)
-
-        # 6. Сохранение финального валидированного продукта
-        df.to_csv(output_path, index=False, encoding='utf-8')
-
-        final_rows = len(df)
-        print(f"Очистка успешно завершена!")
-        print(
-            f"Было строк: {initial_rows} -> Стало строк: {final_rows} (Удалено пустых/корректных: {initial_rows - final_rows})")
-        print(f"Файл сохранен по пути: {output_path}")
-
-    except FileNotFoundError:
-        print(f"Ошибка: Не удалось найти исходный файл по пути {input_path}")
-    except Exception as e:
-        print(f"Произошла непредвиденная ошибка: {e}")
+# На всякий случай прочистим и меры охраны (вдруг там тоже был перенос)
+if 'protection_measures' in df.columns:
+    df['protection_measures'] = df['protection_measures'].str.replace(r'^(охраны|раны)\.\s*', '', regex=True,
+                                                                      flags=re.IGNORECASE)
+# ==========================================
 
 
-if __name__ == "__main__":
-    # Указываем пути в соответствии с вашим запросом
-    INPUT_FILE = "your_path/raw_animals_dataset.csv"
-    OUTPUT_FILE = "your_path/final_animals_dataset.csv"
+# Заменяем пустые строки на NaN для корректной работы pandas
+df = df.replace(r'^\s*$', np.nan, regex=True)
 
-    clean_animals_dataset(INPUT_FILE, OUTPUT_FILE)
+# 1. Удаляем полные дубликаты
+initial_len = len(df)
+df = df.drop_duplicates()
+print(f"Удалено полных дубликатов: {initial_len - len(df)}")
+
+# 2. Оставляем только строки, где есть латинское название
+df = df.dropna(subset=['latin_name'])
+
+
+# Умная функция для объединения текстовых полей (склеиваем разорванные страницы)
+def merge_text(series):
+    series = series.dropna()
+    if len(series) == 0:
+        return ''
+    if len(series) == 1:
+        return str(series.iloc[0])
+
+    texts = list(series.astype(str))
+    merged_text = texts[0].strip()
+
+    for i in range(1, len(texts)):
+        next_text = texts[i].strip()
+        if not next_text:
+            continue
+
+        # Защита от включения одного куска в другой
+        if next_text in merged_text:
+            continue
+        if merged_text in next_text:
+            merged_text = next_text
+            continue
+
+        # Если текст с предыдущей страницы обрывается на дефис — склеиваем вплотную
+        if merged_text.endswith('-'):
+            merged_text = merged_text[:-1] + next_text
+        else:
+            merged_text += ' ' + next_text
+
+    return merged_text
+
+
+# 3. Группируем по латинскому названию
+grouped = df.groupby('latin_name', as_index=False).agg({
+    'page': lambda x: '; '.join(sorted(set(x.astype(str)))),
+    'russian_name': 'first',
+    'family': 'first',
+    'genus': 'first',
+    'category_numeric': 'first',
+    'category_text': 'first',
+    'distribution': merge_text,
+    'habitat': merge_text,
+    'abundance': merge_text,
+    'limiting_factors': merge_text,
+    'protection_measures': merge_text,
+    'additional_measures': merge_text,
+    # Так как авторы теперь идеальны, просто берем первую встретившуюся запись
+    'author': 'first'
+})
+
+print(f"После группировки по латинскому названию: {len(grouped)} уникальных видов")
+
+# Сохраняем финальный результат
+grouped.to_csv(OUTPUT_CSV, index=False, encoding='utf-8-sig')
+print(f"Сохранено в {OUTPUT_CSV}")
