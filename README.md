@@ -14,6 +14,10 @@
 - [Растения (Plants) - CSV](https://github.com/Evgenia-dex/Red_book_Russia_datasets/blob/main/data/processed/plants_final.csv)
 - [Растения (Plants) - JSON](https://github.com/Evgenia-dex/Red_book_Russia_datasets/blob/main/data/processed/plants_final.json)
 
+## Источники данных
+Официальный сайт Министерства природных ресурсов и экологии Российской Федерации: 
+[Красная книга Российской Федерации](https://www.mnr.gov.ru/activity/red_book/krasnaya-kniga-rossiyskoy-federatsii/)
+
 ## Структура репозитория
 
 ```text
